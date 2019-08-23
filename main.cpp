@@ -5,7 +5,7 @@
 
 template<typename T, typename Op>
 T inclusive_scan(const std::vector<T> &in, const T &id, std::vector<T> &out, Op op) {
-	out.resize(in.size(), 0);
+	out.resize(in.size(), id);
 	using range_type = tbb::blocked_range<size_t>;
 	T sum = tbb::parallel_scan(range_type(0, in.size()), id,
 		[&](const range_type &r, T sum, bool is_final_scan) {
@@ -27,7 +27,7 @@ T inclusive_scan(const std::vector<T> &in, const T &id, std::vector<T> &out, Op 
 template<typename T, typename Op>
 T exclusive_scan(const std::vector<T> &in, const T &id, std::vector<T> &out, Op op) {
 	// Exclusive scan is the same as inclusive, but shifted by one
-	out.resize(in.size() + 1, 0);
+	out.resize(in.size() + 1, id);
 	using range_type = tbb::blocked_range<size_t>;
 	T sum = tbb::parallel_scan(range_type(0, in.size()), id,
 		[&](const range_type &r, T sum, bool is_final_scan) {
