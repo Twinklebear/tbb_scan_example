@@ -13,3 +13,5 @@ find_package(TBB REQUIRED)
 add_executable(scan_example main.cpp)
 target_link_libraries(scan_example PUBLIC TBB::tbb)
 
+add_executable(marching_cubes marching_cubes.cpp)
+target_link_libraries(marching_cubes PUBLIC TBB::tbb)
