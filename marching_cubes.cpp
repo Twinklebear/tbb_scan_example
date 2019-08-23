@@ -1,8 +1,12 @@
 #include <array>
+#include <chrono>
 #include <fstream>
 #include <cmath>
 #include <iostream>
+#include <tbb/parallel_for.h>
 #include "scan.h"
+
+using namespace std::chrono;
 
 // Edge and triangle tables for the cases of marching cubes
 // From http://paulbourke.net/geometry/polygonise/ and
@@ -297,7 +301,7 @@ const std::array<vec3i, 8> index_to_vertex = {
 };
 
 // Compute the vertex values of the cell given the ID of its bottom vertex
-void compute_vertex_values(uint8_t *volume, const vec3sz &dims, const vec3sz &cell,
+void compute_vertex_values(const std::vector<uint8_t> &volume, const vec3sz &dims, const vec3sz &cell,
 		std::array<float, 8> &values)
 {
 	for (size_t i = 0; i < index_to_vertex.size(); ++i) {
@@ -321,11 +325,14 @@ vec3f lerp_verts(const vec3i &va, const vec3i &vb, const float fa, const float f
 		va[2] + t * (vb[2] - va[2])};
 }
 
+// Serial marching cubes.
 // Run the Marching Cubes algorithm on the volume to compute
 // the isosurface at the desired value. The volume is assumed
-// to be a Uint8Array, with one uint8 per-voxel.
 // Dims should give the [x, y, z] dimensions of the volume
-void marching_cubes(uint8_t *volume, const vec3sz &dims, const float isovalue, std::vector<vec3f> &vertices) { 
+void marching_cubes(const std::vector<uint8_t> &volume, const vec3sz &dims,
+		const float isovalue, std::vector<vec3f> &vertices)
+{	
+	size_t total_active = 0;
 	std::array<float, 8> vertex_values;
 	for (size_t k = 0; k < dims[2] - 1; ++k) {
 		for (size_t j = 0; j < dims[1] - 1; ++j) {
@@ -355,6 +362,7 @@ void marching_cubes(uint8_t *volume, const vec3sz &dims, const float isovalue, s
 				 *  v0------e0-------v1     O--x
 				 */
 
+				bool made_vert = false;
 				// The triangle table gives us the mapping from index to actual
 				// triangles to return for this configuration
 				for (size_t t = 0; tri_table[index][t] != -1; ++t) {
@@ -365,18 +373,152 @@ void marching_cubes(uint8_t *volume, const vec3sz &dims, const float isovalue, s
 						vertex_values[v0], vertex_values[v1], isovalue);
 
 					vertices.push_back({v[0] + i + 0.5f, v[1] + j + 0.5f, v[2] + k + 0.5f});
+					made_vert = true;
+				}
+				if (made_vert) {
+					++total_active;
 				}
 			}
 		}
 	}
 }
 
+inline vec3sz voxel_id_to_voxel(const size_t id, const vec3sz &dims) {
+	return vec3sz{id % (dims[0] - 1),
+		(id / (dims[0] - 1)) % (dims[1] - 1),
+		id / ((dims[0] - 1) * (dims[1] - 1))
+	};
+}
+
+bool voxel_is_active(const std::vector<uint8_t> &volume, const vec3sz &dims,
+		const float isovalue, const size_t voxel_id)
+{
+	const vec3sz voxel = voxel_id_to_voxel(voxel_id, dims);
+	std::array<float, 8> vertex_values;
+	compute_vertex_values(volume, dims, voxel, vertex_values);
+
+	size_t index = 0;
+	for (size_t v = 0; v < 8; ++v) {
+		if (vertex_values[v] <= isovalue) {
+			index |= 1 << v;
+		}
+	}
+	return index != 0 && index != tri_table.size() - 1;
+}
+
+void compute_num_verts(const std::vector<uint8_t> &volume, const vec3sz &dims,
+		const float isovalue, const size_t voxel_id, const size_t active_id,
+		std::vector<uint32_t> &num_verts)
+{	
+	const vec3sz voxel = voxel_id_to_voxel(voxel_id, dims);
+
+	std::array<float, 8> vertex_values;
+	compute_vertex_values(volume, dims, voxel, vertex_values);
+
+	size_t index = 0;
+	for (size_t v = 0; v < 8; ++v) {
+		if (vertex_values[v] <= isovalue) {
+			index |= 1 << v;
+		}
+	}
+
+	uint32_t nverts = 0;
+	// The triangle table gives us the mapping from index to actual
+	// triangles to return for this configuration
+	for (size_t t = 0; tri_table[index][t] != -1; ++t) {
+		++nverts;
+	}
+	num_verts[active_id] = nverts;
+}
+
+void generate_vertices(const std::vector<uint8_t> &volume, const vec3sz &dims,
+		const float isovalue, const size_t voxel_id, const size_t active_id,
+		const std::vector<uint32_t> &offsets, std::vector<vec3f> &vertices)
+{	
+	const vec3sz voxel = voxel_id_to_voxel(voxel_id, dims);
+	const uint32_t vertex_offset = offsets[active_id];
+
+	std::array<float, 8> vertex_values;
+	compute_vertex_values(volume, dims, voxel, vertex_values);
+	size_t index = 0;
+	for (size_t v = 0; v < 8; ++v) {
+		if (vertex_values[v] <= isovalue) {
+			index |= 1 << v;
+		}
+	}
+
+	// The triangle table gives us the mapping from index to actual
+	// triangles to return for this configuration
+	for (size_t t = 0; tri_table[index][t] != -1; ++t) {
+		const int v0 = edge_vertices[tri_table[index][t]][0];
+		const int v1 = edge_vertices[tri_table[index][t]][1];
+
+		vec3f v = lerp_verts(index_to_vertex[v0], index_to_vertex[v1],
+				vertex_values[v0], vertex_values[v1], isovalue);
+		vertices[vertex_offset + t] = {
+			v[0] + voxel[0] + 0.5f, v[1] + voxel[1] + 0.5f, v[2] + voxel[2] + 0.5f
+		};
+	}
+}
+
+void data_parallel_marching_cubes(const std::vector<uint8_t> &volume, const vec3sz &dims,
+		const float isovalue, std::vector<vec3f> &vertices)
+{
+	// Determine which voxels will generate vertices. The last layer of voxels don't output verts
+	const size_t voxels_to_process = (dims[0] - 1) * (dims[1] - 1) * (dims[2] - 1);
+	std::vector<uint32_t> voxel_active(voxels_to_process, 0);
+	tbb::parallel_for(size_t(0), voxels_to_process,
+		[&](const size_t v) {
+			if (voxel_is_active(volume, dims, isovalue, v)) {
+				voxel_active[v] = 1;
+			}
+		});
+
+	// Exclusive scan to compute total number of active voxels and the offsets to write their ID
+	// to in the compaction
+	std::vector<uint32_t> offsets;
+	const uint32_t total_active = exclusive_scan(voxel_active, uint32_t(0), offsets, std::plus<uint32_t>{});
+
+	// Compact the active voxel IDs
+	std::vector<size_t> active_voxels(total_active, 0);
+	tbb::parallel_for(size_t(0), voxels_to_process,
+		[&](const size_t v) {
+			if (voxel_active[v]) {
+				active_voxels[offsets[v]] = v;
+			}
+		});
+
+	// Free voxel_active memory
+	voxel_active = std::vector<uint32_t>();
+
+	// Determine the number of vertices generated by each active voxel
+	std::vector<uint32_t> num_verts(total_active, 0);
+	tbb::parallel_for(size_t(0), num_verts.size(),
+		[&](const size_t v) {
+			compute_num_verts(volume, dims, isovalue, active_voxels[v], v, num_verts);
+		});
+
+	// Next we perform an exclusive scan to compute the offsets to write the output
+	// vertices to for each voxel, and the total number of vertices we'll generate
+	offsets.clear();
+	const uint32_t total_verts = exclusive_scan(num_verts, uint32_t(0), offsets, std::plus<uint32_t>{});
+
+	// Now we can compute the vertices for each voxel in parallel and write to the corresponding offsets
+	vertices.resize(total_verts);
+	tbb::parallel_for(size_t(0), num_verts.size(),
+		[&](const size_t v) {
+			generate_vertices(volume, dims, isovalue, active_voxels[v], v, offsets, vertices);
+		});
+
+}
+
 int main(int argc, char **argv) {
 	std::vector<std::string> args(argv, argv + argc);
 	std::string fname;
-	std::string output = "isosurface.obj";
+	std::string output;
 	vec3sz dims = {0};
 	float isovalue = 0;
+	bool serial = false;
 	for (int i = 1; i < argc; ++i) {
 		if (args[i] == "-f") {
 			fname = argv[++i];
@@ -388,6 +530,8 @@ int main(int argc, char **argv) {
 			isovalue = std::atof(argv[++i]) / 255.f;
 		} else if (args[i] == "-o") {
 			output = args[++i];
+		} else if (args[i] == "-serial") {
+			serial = true;
 		}
 	}
 
@@ -401,18 +545,32 @@ int main(int argc, char **argv) {
 	std::vector<uint8_t> volume(n_voxels, 0);
 	fin.read(reinterpret_cast<char*>(volume.data()), volume.size());
 
-	std::vector<vec3f> vertices;
-	marching_cubes(volume.data(), dims, isovalue, vertices);
+	auto start = high_resolution_clock::now();
 
-	std::ofstream fout(output.c_str());
-	fout << "# Isosurface of " << fname << " at isovalue " << isovalue * 255.f << "\n";
-	for (const auto &v : vertices) {
-		fout << "v " << v[0] << " " << v[1] << " " << v[2] << "\n";
+	std::vector<vec3f> vertices;
+	if (serial) {
+		marching_cubes(volume, dims, isovalue, vertices);
+	} else {
+		data_parallel_marching_cubes(volume, dims, isovalue, vertices);
 	}
 
-	// Every three pairs of vertices forms a face
-	for (size_t i = 0; i < vertices.size(); i += 3) {
-		fout << "f " << i + 1 << " " << i + 2 << " " << i + 3 << "\n";
+	auto end = high_resolution_clock::now();
+	auto dur = duration_cast<milliseconds>(end - start);
+
+	std::cout << "Isosurface with " << vertices.size() / 3 << " triangles computed in "
+		<< dur.count() << "ms " << (serial ? "(serial)\n" : "(parallel)\n");
+
+	if (!output.empty()) {
+		std::ofstream fout(output.c_str());
+		fout << "# Isosurface of " << fname << " at isovalue " << isovalue * 255.f << "\n";
+		for (const auto &v : vertices) {
+			fout << "v " << v[0] << " " << v[1] << " " << v[2] << "\n";
+		}
+
+		// Every three pairs of vertices forms a face
+		for (size_t i = 0; i < vertices.size(); i += 3) {
+			fout << "f " << i + 1 << " " << i + 2 << " " << i + 3 << "\n";
+		}
 	}
 
 	return 0;
