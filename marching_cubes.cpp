@@ -309,7 +309,7 @@ void compute_vertex_values(const std::vector<uint8_t> &volume, const vec3sz &dim
 		// We want to swap the order we go when on the top of the cube,
 		// due to how the indices are labeled in the paper.
 		size_t voxel = ((cell[2] + v[2]) * dims[1] + cell[1] + v[1]) * dims[0] + cell[0] + v[0];
-		values[i] = volume[voxel] / 255.0;
+		values[i] = volume[voxel];
 	};
 }
 
@@ -527,7 +527,7 @@ int main(int argc, char **argv) {
 			dims[1] = std::atoi(argv[++i]);
 			dims[2] = std::atoi(argv[++i]);
 		} else if (args[i] == "-iso") {
-			isovalue = std::atof(argv[++i]) / 255.f;
+			isovalue = std::atof(argv[++i]);
 		} else if (args[i] == "-o") {
 			output = args[++i];
 		} else if (args[i] == "-serial") {
