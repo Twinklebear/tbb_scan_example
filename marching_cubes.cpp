@@ -1,4 +1,5 @@
 #include <array>
+#include <random>
 #include <chrono>
 #include <fstream>
 #include <cmath>
@@ -287,6 +288,7 @@ const std::array<std::array<int, 2>, 12> edge_vertices = {
 
 using vec3sz = std::array<size_t, 3>;
 using vec3f = std::array<float, 3>;
+using vec2f = std::array<float, 2>;
 using vec3i = std::array<int, 3>;
 
 const std::array<vec3i, 8> index_to_vertex = {
@@ -518,6 +520,8 @@ int main(int argc, char **argv) {
 	std::string output;
 	vec3sz dims = {0};
 	float isovalue = 0;
+    int benchmark_iters = 1;
+    vec2f bench_range = {0};
 	bool serial = false;
 	for (int i = 1; i < argc; ++i) {
 		if (args[i] == "-f") {
@@ -528,6 +532,10 @@ int main(int argc, char **argv) {
 			dims[2] = std::atoi(argv[++i]);
 		} else if (args[i] == "-iso") {
 			isovalue = std::atof(argv[++i]);
+        } else if (args[i] == "-bench") {
+            bench_range[0] = std::atof(argv[++i]);
+            bench_range[1] = std::atof(argv[++i]);
+            benchmark_iters = 100;
 		} else if (args[i] == "-o") {
 			output = args[++i];
 		} else if (args[i] == "-serial") {
@@ -545,20 +553,35 @@ int main(int argc, char **argv) {
 	std::vector<uint8_t> volume(n_voxels, 0);
 	fin.read(reinterpret_cast<char*>(volume.data()), volume.size());
 
-	auto start = high_resolution_clock::now();
-
+    size_t total_time = 0;
+    float value_range = bench_range[1] - bench_range[0];
+    std::random_device rd;
+    std::mt19937 rng(rd());
+    std::uniform_real_distribution<float> distrib;
 	std::vector<vec3f> vertices;
-	if (serial) {
-		marching_cubes(volume, dims, isovalue, vertices);
-	} else {
-		data_parallel_marching_cubes(volume, dims, isovalue, vertices);
-	}
+    for (size_t i = 0; i < benchmark_iters; ++i) {
+        vertices.clear();
+        if (benchmark_iters != 1) {
+            isovalue = bench_range[0] + value_range * distrib(rng);
+            std::cout << "isovalue: " << isovalue << "\n";
+        }
 
-	auto end = high_resolution_clock::now();
-	auto dur = duration_cast<milliseconds>(end - start);
+        auto start = high_resolution_clock::now();
 
-	std::cout << "Isosurface with " << vertices.size() / 3 << " triangles computed in "
-		<< dur.count() << "ms " << (serial ? "(serial)\n" : "(parallel)\n");
+        if (serial) {
+            marching_cubes(volume, dims, isovalue, vertices);
+        } else {
+            data_parallel_marching_cubes(volume, dims, isovalue, vertices);
+        }
+
+        auto end = high_resolution_clock::now();
+        auto dur = duration_cast<milliseconds>(end - start).count();
+        total_time += dur;
+
+        std::cout << "Isosurface with " << vertices.size() / 3 << " triangles computed in "
+            << dur << "ms " << (serial ? "(serial)\n" : "(parallel)\n");
+    }
+    std::cout << "Average compute time: " << static_cast<float>(total_time) / benchmark_iters << "ms\n"; 
 
 	if (!output.empty()) {
 		std::ofstream fout(output.c_str());
